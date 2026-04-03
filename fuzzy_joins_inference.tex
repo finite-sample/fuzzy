@@ -1,0 +1,276 @@
+\documentclass[12pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{enumitem}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\onehalfspacing
+
+\title{From Data Products to Inference:\\ The Econometrics of Fuzzy Joins}
+\author{Gaurav Sood}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Data products built on fuzzy joins ship a single canonical linkage, hiding the many-to-many candidate-match graph from which it was constructed. This note studies downstream regression when the analyst has access to the candidate graph. Two naive single-dataset resolutions can mislead: edge expansion introduces an additional within-candidate-set variance penalty in the denominator of the OLS estimator, while score averaging induces nonclassical measurement error whose bias can have either sign. I propose multiple imputation over candidate assignments as an approximate solution that propagates linkage uncertainty, provided the candidate graph has high recall and the imputation probabilities are calibrated. When a validation sample with verified true links is available, the problem simplifies to regression calibration and the candidate graph is not needed. Simulations illustrate that these approaches can materially reduce bias and that the between-imputation share of variance is a useful diagnostic for when linkage uncertainty matters.
+\end{abstract}
+
+\section{Introduction}
+
+Empirical researchers routinely analyze datasets assembled upstream by fuzzy-joining multiple administrative files. A firm-level panel might link Economic Census records to census villages using string similarity on transliterated place names. A health dataset might link hospital admissions to laboratory records using probabilistic matching on date of birth and Soundex codes. The analyst receives a clean panel and runs regressions on it, treating each row as if the linkage were exact. But the matching algorithm made decisions---it assigned ambiguous records to their best candidate or dropped them, and it routed some records to the wrong target. These decisions are part of the data-generating process, yet they are invisible in the shipped dataset.
+
+This note asks what happens at the inference stage when the analyst can see the matching decisions. Suppose the data product ships not just the canonical linkage but the full candidate-match graph: every plausible (source, target) pair with a pairwise evidence score. The graph is bipartite and many-to-many. A firm can match several villages. A village can receive firms from multiple candidate sets. How should the analyst resolve this graph into a regression dataset?
+
+Three findings emerge. First, two natural single-dataset resolutions can mislead. Expanding the graph (one row per candidate pair) introduces a within-candidate-set variance penalty in the denominator of the estimator, shrinking the coefficient relative to the score-averaged resolution (Proposition~\ref{prop:expanded}). Collapsing the graph (one row per firm, covariate averaged across candidates) induces nonclassical measurement error whose bias depends on the covariance between the true covariate and the averaging error, and can have either sign (Proposition~\ref{prop:collapsed}). Second, multiple imputation over candidate assignments provides an approximate solution that propagates linkage uncertainty, under conditions stated in Assumption~\ref{asm:mi}. Third, when a validation sample with verified true links is available---sampled from the full population including dropped records---the problem simplifies to regression calibration.
+
+The literature on regression with linked data is substantial. \citet{lahiri2005} derive unbiased regression estimators under a one-to-one permutation model with known linkage probabilities. \citet{scheuren1993,scheuren1997} provide ratio-type bias corrections. \citet{chambers2009} and \citet{kim2012} extend these ideas to heterogeneous linkage error and incomplete linkage. \citet{kim2012multi} handle the case where more than two files are linked in a chain, with correlated linkage errors; \citet{kim2015} further relax the exchangeable-error assumption. \citet{han2019} develop a unified framework that exploits record linkage process data.
+
+The approach closest to the MI procedure proposed here is \citet{goldstein2012}, who frame uncertain links as partially observed data and impute from candidate sets using match weights as priors. Their ``prior-informed imputation'' draws one candidate per ambiguous record in each imputation, which is the same mechanism described in Section~\ref{sec:mi}. \citet{harron2014} evaluate this approach in a healthcare linkage setting and find it reduces bias from linkage error. However, their worked examples and simulations are one-to-one healthcare linkages (patient admissions to lab records); the econometric consequences of the many-to-many geographic structure---phantom clustering, leverage contamination, sign-indeterminate bias from averaged covariates---are not analyzed.
+
+\citet{hof2012,hof2015} propose pseudo-likelihood methods treating match status as latent. \citet{hof2017} extend this to a joint probabilistic record linkage and survival model, estimating linkage and regression parameters simultaneously. \citet{slawski2021,slawski2025} develop a general mixture-model framework for secondary analysis when the analyst has only the linked file, applicable to GLMs, Cox models, and predictive modeling. \citet{wang2022} survey these and related developments. \citet{doidge2019} provide an accessible overview of linkage error bias for applied researchers. The Bayesian approach to joint linkage and inference \citep{tancredi2011,tancredi2015,steorts2016,gutman2013,dalzell2018,steorts2018} propagates uncertainty exactly by jointly modeling the matching and the downstream analysis; \citet{steorts2016} explicitly model linkage as a bipartite graph and allow duplicate detection. These methods require access to raw matching data and are computationally intensive.
+
+The regression calibration approach in Section~\ref{sec:validation} connects to the classical measurement error literature \citep{carroll2006}, treating the fuzzy-join output as a mismeasured proxy for the true covariate. This connection has not been made explicit in the record linkage literature, where the focus is on correcting for linkage error within the linked file rather than using an external validation sample to calibrate the proxy relationship.
+
+These papers study related settings. My contribution is narrower: I analyze the specific downstream regression problem created when a data product ships a candidate-match table from a geographic fuzzy join. I compare expanded-edge, score-averaged, and imputation-based resolutions of the same candidate graph and show that the two single-dataset approaches produce distinct, formally characterizable pathologies (Propositions~\ref{prop:expanded}--\ref{prop:collapsed}). The nonclassical measurement error structure that arises from fuzzy string matching---where mismatches are confined to string-similar neighbors rather than exchangeable across records---makes the collapsed estimator's bias sign-indeterminate, a result that does not appear in the existing treatment. The MI procedure itself follows \citet{goldstein2012}; what is new is the analysis of when and why it is needed in the many-to-many geographic setting, and the regression calibration alternative when a full-population validation sample exists.
+
+\section{Setup and Notation}
+
+Let $S = \{1,\dots,n\}$ index records in a source table (firms) and $T = \{1,\dots,K\}$ index records in a target table (villages). For each firm $i$, the true target is $v(i) \in T$. The regression of interest is
+\begin{equation}\label{eq:dgp}
+    Y_i = \beta_0 + \beta_1 X_{v(i)} + \eta_{v(i)} + \varepsilon_i,
+\end{equation}
+where $X_k$ is a village-level covariate, $\eta_k \sim (0,\sigma^2_\eta)$ is a village-level shock, and $\varepsilon_i \sim (0,\sigma^2_\varepsilon)$ is firm-level noise. We observe $Y_i$ for every firm. We do not observe $v(i)$.
+
+A fuzzy matcher produces a candidate-match graph $\mathcal{G} = (S, T, E, s)$, where $E \subseteq S \times T$ is a set of candidate edges and $s: E \to [0,1]$ assigns a pairwise evidence score to each edge. The candidate set for firm $i$ is $\mathcal{C}_i = \{(j, s_{ij}) : (i,j) \in E\}$. Throughout, I distinguish between the raw score $s_{ij}$ and any calibrated match probability $p_{ij} \approx P(v(i) = j \mid \mathcal{C}_i)$, which must be estimated separately.
+
+A resolution policy is a map $\pi: \mathcal{G} \to \mathcal{D}$ that produces a regression dataset $\mathcal{D}$, where each row has a dependent variable, a covariate, a weight, and a cluster identity. The canonical policy assigns firm $i$ to its top candidate if $s_{i(1)} \geq \tau$ and $s_{i(1)} - s_{i(2)} \geq \delta$, and drops everything else.
+
+Three features of $\mathcal{G}$ create complications absent from the one-to-one permutation model of \citet{lahiri2005}.
+
+\paragraph{One-to-many.} A single firm $i$ has edges to multiple candidate villages. This is the source of ambiguity. If $|\mathcal{C}_i| > 1$ with similar scores, the analyst must decide which covariate to assign.
+
+\paragraph{Many-to-one.} Multiple firms share a candidate village. Under the canonical policy, this is benign: several firms assigned to the same village produce the standard within-village clustering. Under the expanded join, village $k$ receives firms from other villages whose candidate sets include $k$, contaminating the cluster.
+
+\paragraph{Many-to-many.} A connected component in $\mathcal{G}$ contains multiple firms and multiple villages with edges crossing in both directions. Matching decisions within such a component are interdependent: assigning firm $i$ to village $k$ rather than $k'$ changes the composition of both village clusters.
+
+Within-table deduplication (collapsing records that may refer to the same firm) creates a further many-to-one problem in the source table that compounds with the cross-table structure. I set this aside, noting that the same candidate-set framework applies.
+
+\section{A Worked Example}\label{sec:example}
+
+Ten villages, 51 firms. Three villages form a confusable cluster: rampur ($X = 0.85$), rampura ($X = 0.70$), ramnagar ($X = 0.50$). Their names differ by one or two characters, creating cross-matches under transliteration noise. Two villages, sultanpur ($X = 0.65$) and sultanganj ($X = 0.45$), are mildly confusable. The remaining five have distinctive names and never generate ambiguity.
+
+The DGP follows (\ref{eq:dgp}) with $\beta_0 = 3$, $\beta_1 = 5$, $\sigma_\eta = 0.8$, $\sigma_\varepsilon = 1.5$. The candidate-match table for selected ram-cluster firms is shown in Table~\ref{tab:example_candidates}.
+
+\begin{table}[ht]
+\centering
+\caption{Candidate-match table, selected firms from the ram-cluster. $\leftarrow$ marks the true village.}
+\label{tab:example_candidates}
+\input{tables/example_candidates}
+\end{table}
+
+Firm~0 is clean: rampur dominates. Firm~6 is a false positive: ``rampura'' perfectly matches the wrong village, and the canonical policy assigns it to rampura with confidence (the analyst's dataset records literacy as 0.70 instead of 0.85). Firm~3 ties at 0.86 between rampur and rampura; under the canonical policy ($\delta = 0.10$), it is dropped. Firm~11 ties and is also dropped.
+
+The canonical policy yields 49 matched firms: 47 true positives, 2 false positives, 2 false negatives. The ram-cluster forms a dense many-to-many connected component: 21 firms and 3 villages connected by candidate edges. Under the canonical policy, it resolves to a clean many-to-one structure. Under the expanded join, the many-to-many structure is preserved.
+
+Table~\ref{tab:example_summary} summarizes match outcomes. Table~\ref{tab:estimators_toy} compares estimators on the toy data.
+
+\begin{table}[ht]
+\centering
+\caption{Match outcomes, toy example ($\tau = 0.50$, $\delta = 0.10$).}
+\label{tab:example_summary}
+\input{tables/example_summary}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Estimator comparison, toy example ($K=10$, $n=51$).}
+\label{tab:estimators_toy}
+\input{tables/estimators_toy}
+\end{table}
+
+\begin{remark}
+The toy DGP has $\beta_1 = 5$, but with 10 villages and $\sigma_\eta = 0.8$, the oracle estimate is $\hat\beta_1 = 6.18$, reflecting sampling variability with a small number of village-level clusters. The toy example illustrates graph geometry and the mechanics of each resolution. Quantitative comparisons of estimator performance at scale come from the medium-scale simulation ($K=40$, $n=600$) in Section~\ref{sec:when}.
+\end{remark}
+
+
+\section{Single-Dataset Resolutions}\label{sec:resolutions}
+
+The canonical policy drops ambiguous firms, creating a selection problem analogous to listwise deletion. This is well understood \citep{diconsiglio2018,doidge2019}. The natural response is to use the full candidate-match graph. This section shows that the two obvious single-dataset approaches each produce a distinct pathology.
+
+\subsection{The Expanded Full Join}\label{sec:expanded}
+
+Keep every candidate pair $(i,j)$ with $s_{ij} \geq \tau$. Firm $i$ appears $|\mathcal{C}_i|$ times, once for each candidate village, with the same $Y_i$ and different $X_j$. Assign score-proportional weights $w_{ij} = s_{ij} / \sum_{j'} s_{ij'}$ within each candidate set. In the example, 51 firms generate 76 rows.
+
+Two problems are bundled here. The first is a point-estimate problem: the same outcome $Y_i$ is paired with multiple candidate covariates, only one of which generated it. The second is an inference problem: the cluster structure in the expanded dataset is contaminated.
+
+\begin{proposition}[Expanded vs.\ collapsed estimator]\label{prop:expanded}
+Define the score-weighted average covariate $\tilde X_i = \sum_j w_{ij} X_j$ and the within-candidate-set variance $V_i = \sum_j w_{ij}(X_j - \tilde X_i)^2$. Weighted OLS on the expanded edge-level data gives, after centering,
+\[
+    \hat\beta_{\mathrm{exp}} = \frac{\sum_i Y_i \tilde X_i}{\sum_i \tilde X_i^2 + \sum_i V_i}.
+\]
+The collapsed estimator (one row per firm, covariate $\tilde X_i$) gives
+\[
+    \hat\beta_{\mathrm{col}} = \frac{\sum_i Y_i \tilde X_i}{\sum_i \tilde X_i^2}.
+\]
+Therefore $|\hat\beta_{\mathrm{exp}}| \leq |\hat\beta_{\mathrm{col}}|$ whenever $\operatorname{sign}(\hat\beta_{\mathrm{exp}}) = \operatorname{sign}(\hat\beta_{\mathrm{col}})$. The expanded estimator is shrunk toward zero relative to the collapsed estimator by a factor $\sum_i \tilde X_i^2 / (\sum_i \tilde X_i^2 + \sum_i V_i)$.
+\end{proposition}
+
+\begin{proof}
+The expanded WLS objective with weights $w_{ij}$ can be written in terms of firm-level sufficient statistics. The cross-product $\sum_{i,j} w_{ij} Y_i X_j = \sum_i Y_i \tilde X_i$ because $Y_i$ is constant within firm $i$. The sum of squares decomposes as $\sum_{i,j} w_{ij} X_j^2 = \sum_i \tilde X_i^2 + \sum_i V_i$ by the variance decomposition identity.
+\end{proof}
+
+The penalty $\sum_i V_i$ is the total within-candidate-set dispersion of $X$. For firms with a single candidate, $V_i = 0$. For ambiguous firms in confusable clusters, $V_i$ can be large. The expanded estimator is not necessarily attenuated relative to the oracle---since the collapsed estimator can overshoot (Section~\ref{sec:collapsed})---but it is always more shrunk toward zero than the collapsed estimator.
+
+The inference problem is distinct. The many-to-one contamination means that rampur's cluster in the expanded dataset contains firms whose outcomes were generated by different village-level shocks $\eta$. Two-way clustering (firm, village) addresses the mechanical correlation from repeated $Y_i$ values but does not correct for the contaminated village clusters. Village-level aggregates computed from the expanded data are also biased: mean revenue in rampur, computed over the 15 firms assigned there, includes 7 firms whose outcomes were generated elsewhere.
+
+The expanded full join is a useful artifact to ship because it encodes $\mathcal{G}$ completely. It is not a regression dataset.
+
+\subsection{The Collapsed Estimator}\label{sec:collapsed}
+
+Construct one row per firm with score-weighted average covariate $\tilde X_i = \sum_j w_{ij} X_j$. Write $\tilde X_i = X_{v(i)} + u_i$, where $X_{v(i)} \equiv X_i^*$ is the true covariate and $u_i = \tilde X_i - X_i^*$ is measurement error. For unambiguous firms, $u_i \approx 0$. For ambiguous firms, $u_i$ is determined by the candidate-set structure.
+
+\begin{proposition}[Collapsed estimator: nonclassical EIV]\label{prop:collapsed}
+Under model~(\ref{eq:dgp}) with $E[\varepsilon_i \mid X_i^*, u_i] = 0$, the probability limit of the collapsed OLS estimator is
+\[
+    \operatorname{plim} \hat\beta_{\mathrm{col}} = \beta_1 \cdot \frac{\operatorname{Var}(X^*) + \operatorname{Cov}(X^*, u)}{\operatorname{Var}(X^*) + \operatorname{Var}(u) + 2\operatorname{Cov}(X^*, u)}.
+\]
+Classical attenuation obtains when $\operatorname{Cov}(X^*, u) = 0$. When $\operatorname{Cov}(X^*,u) \neq 0$, the bias can have either sign.
+\end{proposition}
+
+\begin{proof}
+Standard errors-in-variables algebra. Write $\hat\beta_{\mathrm{col}} = \widehat{\operatorname{Cov}}(\tilde X, Y) / \widehat{\operatorname{Var}}(\tilde X)$. Since $\tilde X = X^* + u$ and $Y = \beta_1 X^* + \eta + \varepsilon$, the numerator converges to $\beta_1[\operatorname{Var}(X^*) + \operatorname{Cov}(X^*,u)]$ and the denominator to $\operatorname{Var}(X^*) + \operatorname{Var}(u) + 2\operatorname{Cov}(X^*,u)$.
+\end{proof}
+
+The result makes the source of sign-indeterminate bias transparent. In fuzzy matching, $u_i$ is nonzero only for firms in confusable clusters. If those clusters have above-average $X^*$ (as when common-root village names concentrate in higher-literacy areas), then $\operatorname{Cov}(X^*,u)$ can be positive and large enough to push the bias ratio above one, amplifying rather than attenuating the coefficient. In the medium-scale simulation ($K=40$, $n=600$), $\hat\beta_{\mathrm{col}} = 9.21$ against an oracle of $6.32$, a bias of $+46\%$.
+
+The analyst cannot safely assume attenuation; the direction of the bias depends on how ambiguity covaries with $X$, which is determined by the naming conventions of the underlying geography and the structure of the string-similarity graph.
+
+\begin{remark}
+In \citet{lahiri2005} and \citet{slawski2025}, mismatches are modeled as exchangeable: any record can be swapped with any other, producing $\operatorname{Cov}(X^*,u) = 0$ and classical attenuation. \citet{kim2015} relax the exchangeability assumption and allow for correlated linkage errors, but in a setting where the correlation arises from shared linking variables, not from the string-similarity structure of place names. In fuzzy geographic matching, mismatches are structured by the candidate graph: a rampur firm can only be swapped with rampura or ramnagar, never with bagaha or dharamkot. This constraint makes $\operatorname{Cov}(X^*,u)$ generically nonzero and its sign dependent on the covariate structure of the confusable clusters.
+\end{remark}
+
+\subsection*{Transition}
+
+Both single-dataset resolutions flatten the candidate-match graph into one realization. The expanded approach pairs each outcome with multiple candidate covariates, penalizing the denominator. The collapsed approach replaces the candidate set with a weighted average, inducing nonclassical measurement error. An alternative is to resolve ambiguity across multiple datasets, each representing one plausible assignment.
+
+\section{Multiple Imputation Over the Candidate Graph}\label{sec:mi}
+
+\begin{assumption}[Conditions for MI over candidate assignments]\label{asm:mi}
+The MI procedure below requires three conditions.
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{High recall.} For all but a negligible fraction of firms $i$, the true village $v(i)$ is contained in $\mathcal{C}_i$. If the true link is absent from the candidate set, no imputation procedure can recover it.
+    \item \textbf{Calibrated probabilities.} The imputation probabilities $p_{ij}$ approximate $P(v(i) = j \mid \mathcal{C}_i)$. Raw similarity scores $s_{ij}$ need not satisfy this; calibration from a validation sample (Section~\ref{sec:validation}) or a multinomial model is needed in general.
+    \item \textbf{Approximate independence.} Firm-level draws are an acceptable approximation to any component-level constraints on the matching. Section~\ref{sec:mi_caveat} discusses when this fails.
+\end{enumerate}
+\end{assumption}
+
+Under Assumption~\ref{asm:mi}, generate $M$ datasets as follows. In each draw $m$, for each firm $i$: if $i$ is unambiguous under the canonical policy, assign $v^{(m)}(i)$ to its top candidate deterministically; if $i$ is ambiguous, draw one candidate village with probability $p_{ij}$; if $i$ has zero candidates, exclude it from draw $m$. Each draw produces a standard dataset: one row per included firm, one covariate value $X_{v^{(m)}(i)}$, clustered at $v^{(m)}(i)$. Run the model on each draw; combine via Rubin's rules \citep{rubin1987}.
+
+The pooled estimate is $\hat Q = M^{-1} \sum_m \hat\beta_1^{(m)}$. The total variance is
+\begin{equation}\label{eq:rubin}
+    T = \bar U + \left(1 + \frac{1}{M}\right) B,
+\end{equation}
+where $\bar U = M^{-1}\sum_m \hat V^{(m)}$ is the mean within-imputation variance and $B = (M-1)^{-1}\sum_m (\hat\beta_1^{(m)} - \hat Q)^2$ is the between-imputation variance.
+
+The diagnostic
+\[
+    \lambda = \frac{(1+1/M)B}{T}
+\]
+summarizes the share of the reported variance attributable to between-imputation dispersion under the imputation model. It is an MI-style diagnostic, not an exact causal decomposition of variance into ``sampling'' and ``matching'' components.
+
+Within each draw, the dataset has one row per firm and one village assignment. There is no within-candidate-set variance penalty (unlike the expanded join) and no averaged-$X$ pathology (unlike the collapsed estimator). Each firm belongs to exactly one village cluster, and the many-to-one contamination that afflicts the expanded join does not arise: a village's cluster in draw $m$ contains only firms assigned to that village in draw $m$.
+
+When the candidate graph has high recall and the imputation probabilities are calibrated, MI over candidate assignments can substantially reduce bias relative to deterministic resolutions while propagating linkage uncertainty through Rubin's rules. In the medium-scale simulation, MI gives $\hat\beta_1 = 6.01$, within 4.9\% of the oracle ($6.32$), with $\lambda = 0.006$ (Tables~\ref{tab:estimators_main}--\ref{tab:mi_diag}).
+
+\subsection{Caveat: Independent Draws in Dense Components}\label{sec:mi_caveat}
+
+The procedure draws matches independently across firms. Within a dense connected component (such as the ram-cluster: 21 firms, 3 villages), a draw that sends all 21 firms to rampur is valid under independent sampling but not a plausible realization of the true linkage, because each village has a known approximate firm count. This is an approximation, not a feature, and should be understood as such from the outset.
+
+In the one-to-one permutation model of \citet{lahiri2005}, this is handled by construction. In the many-to-many graph, independent draws do not enforce population-size constraints. The practical consequence is that $B$ may overstate matching uncertainty by including implausible allocations. A more disciplined approach would sample from the posterior over matchings conditional on village-level firm counts, treating the matching as a constrained assignment problem \citep{tancredi2015,steorts2016}. For most applications, independent-draw MI is a reasonable first approximation: the number of ambiguous firms is typically small relative to village populations, so marginal draws barely perturb village-level counts.
+
+
+\section{Validation Samples and Regression Calibration}\label{sec:validation}
+
+When no validation data are available, the MI procedure of Section~\ref{sec:mi} is the analyst's best option. When a validation sample with verified true links exists, the problem simplifies.
+
+Suppose the data producer verifies the true village $v(i)$ for a random sample of $n_v$ firms. Call this the golden set $\mathcal{V}$. For each $i \in \mathcal{V}$, the analyst observes both the true covariate $X_{v(i)}$ and the assigned covariate $X_{\pi(i)}$ from the canonical linkage.
+
+On the full linked dataset, run $Y$ on $X_{\pi(i)}$ to get $\hat\beta_{\mathrm{naive}}$. On the golden set, run $X_{v(i)}$ on $X_{\pi(i)}$ to get $\hat\gamma$. The corrected estimate is $\hat\beta_{\mathrm{corrected}} = \hat\beta_{\mathrm{naive}} / \hat\gamma$. Bootstrap the pair of regressions for standard errors. This is standard regression calibration in the measurement error literature \citep{carroll2006}, applied here with the fuzzy-join output serving as the mismeasured proxy.
+
+The calibration slope $\hat\gamma$ absorbs the combined effect of false positives, the nonclassical error structure, and the correlation between error and covariate. The analyst does not need the candidate-match graph.
+
+\paragraph{What the golden set must contain.} This is the critical design requirement. If the golden set is a random sample of \textit{matched records only}, the analyst can estimate $\hat\gamma$ and correct for FP bias, because the golden set reveals how the assigned covariate deviates from the true covariate among retained firms. But the canonical policy also dropped firms. The dropped firms are absent from the matched sample. Selection bias from false negatives is invisible.
+
+If the golden set is a random sample of the \textit{full population}, including firms that the canonical policy dropped, the analyst can address both problems. For matched firms, the calibration slope corrects for FP bias. For dropped firms, the analyst now observes their true villages and can estimate the selection bias directly: the gap between the oracle regression on the full golden set (all firms, true links) and the oracle restricted to matched firms is the selection bias; the gap between the restricted oracle and the naive regression on matched firms is the measurement error bias from FPs.
+
+\paragraph{Limitations.} Three issues warrant care.
+
+First, the measurement error from fuzzy matching is heterogeneous: distinctive-village firms have zero error; confusable-cluster firms have potentially large error. A single $\hat\gamma$ averages over both populations. If the confusable-cluster share is modest, $\hat\gamma$ is dominated by the zero-error firms and barely corrects. Stratifying by candidate-set size or score gap helps but requires larger golden sets.
+
+Second, regression calibration gives a corrected point estimate and a total SE via bootstrapping, but it does not decompose variance into sampling and matching components. If the analyst needs $\lambda$, they need MI. But for the narrower question ``what is the right $\hat\beta$ and how precise is it,'' regression calibration suffices.
+
+Third, if the golden set oversamples from ambiguous components (as would be natural for efficiency), any extrapolation to the full dataset requires reweighting to restore population representativeness. The bias and $\lambda$ estimates are conditional on the golden-set composition; without reweighting, they are not population-representative.
+
+
+\section{When Does Matching Uncertainty Matter?}\label{sec:when}
+
+Two conditions must hold jointly for matching uncertainty to be large relative to sampling uncertainty. A non-trivial share of records must be ambiguous. And the candidate villages in ambiguous sets must differ meaningfully on $X$. If either condition fails, matching uncertainty is small.
+
+In the simulation ($K=40$, $n=600$, three confusable clusters), 4\% of firms are ambiguous and candidate literacies differ by up to 0.50 within sets, yet $\lambda = 0.006$. The bootstrap exercise (Table~\ref{tab:variance_decomp}) shows that matching uncertainty is small relative to sampling uncertainty in this design, but it does not deliver an exact additive decomposition: the variance of $\hat\beta_1$ from sampling (holding matches fixed) is $0.22$, from matching (holding the sample fixed) is $0.008$, and the joint variance is $0.18$.
+
+\begin{table}[ht]
+\centering
+\caption{Estimator comparison, medium-scale simulation ($K=40$, $n=600$).}
+\label{tab:estimators_main}
+\input{tables/estimators_main}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{MI diagnostics via Rubin's rules ($M = 200$ draws).}
+\label{tab:mi_diag}
+\input{tables/mi_diagnostics}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Bootstrap variance decomposition ($B = 200$ replicates).}
+\label{tab:variance_decomp}
+\input{tables/variance_decomp}
+\end{table}
+
+Calibration to real data products suggests when matching uncertainty would be larger. Published applications of masala-merge report match rates that vary sharply by linkage task: some census-to-census location matches exceed 98\%, while Economic Census to village linkages report match rates of 65\% to 85\% in certain states \citep{diconsiglio2018}. In the latter regime, 15 to 35\% of records are dropped or ambiguous, and $\lambda$ can exceed 0.10.
+
+Whether the analyst needs $\lambda$ or just a corrected estimate determines which path to take. With a full-population golden set, regression calibration gives the corrected $\hat\beta$ and a total SE. With the candidate-match table and MI, the analyst additionally gets $\lambda$. As simulation-based guidance: if $\lambda < 0.05$, matching uncertainty can be noted but safely ignored; if $\lambda > 0.10$, the MI-based interval should be the primary reported interval.
+
+
+\section{Implications for Data Products}
+
+The analysis suggests two paths to valid inference, and the data product should support both.
+
+The simpler path requires a validated random sample from the full population, including records the canonical policy dropped. With this golden set, the analyst uses regression calibration to correct for both FP bias and selection bias. The candidate graph is not needed. The analyst burden is low.
+
+The harder path requires the candidate-match graph: a table with one row per (source, candidate) pair above a screening threshold, with columns for $s_{ij}$, rank, and a flag for the default assignment. With this graph, the analyst runs MI, computes $\lambda$, and assesses whether matching uncertainty is material. This is more informative but more complex.
+
+Verifying a few hundred records from the full population is a one-time cost that simplifies every downstream analysis. Shipping the candidate-match table enables a richer decomposition at higher analyst cost. When both are feasible, they complement each other: the golden set enables quick regression calibration and assessment of whether the canonical linkage is adequate, while the candidate-match table enables MI with calibrated probabilities estimated from the golden set.
+
+Both paths require the canonical linkage with \texttt{match\_status} flags (exact, unambiguous fuzzy, ambiguous dropped, no candidates). This is the baseline artifact. Analysts who never examine the golden set or candidate table still benefit from knowing which records are exact matches, which are fuzzy, and which were dropped.
+
+The matching step belongs on the same footing as other uncertain components of empirical analysis. Analysts already report standard errors that account for sampling, clustering, and heteroskedasticity. Matching uncertainty, when non-negligible, belongs in the same accounting.
+
+\bibliographystyle{apalike}
+\bibliography{references}
+
+\end{document}
