@@ -1,0 +1,325 @@
+\documentclass[12pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\onehalfspacing
+
+\title{From Data Products to Inference:\\ The Econometrics of Fuzzy Joins}
+\author{Gaurav Sood}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Data products built on fuzzy joins often ship a single canonical linkage while concealing the candidate-match graph from which that linkage was constructed. This note studies downstream regression when the analyst can observe the candidate graph. Two natural single-dataset resolutions fail for different reasons. Edge expansion introduces an algebraic variance penalty that mechanically shrinks the slope relative to a score-collapsed regression. Score averaging, by contrast, induces nonclassical measurement error whose bias need not attenuate and can have either sign. Which linkage errors matter depends on the estimand: joins that assign treatment status, joins that attach outcomes to pre-assigned groups, and level estimands face different error costs. I discuss two practical corrections---multiple imputation over candidate assignments and validation-sample regression calibration---and then show that both may miss a second problem: upstream contamination when the covariates shipped in the target table were themselves created by an earlier fuzzy join. The note's main message is that linkage uncertainty is not a single scalar property of a linked file; it is estimand-specific, and some of it is inherited from the data product itself.
+\end{abstract}
+
+\section{Introduction}
+
+Empirical researchers increasingly work with linked data products assembled upstream from administrative or transactional files. In many applications the linking step is not exact: records are joined using names, dates, locations, and other quasi-identifiers that produce a set of plausible candidate matches rather than a single certainty. The analyst, however, usually receives a clean final file and proceeds as if each row were linked without error.
+
+This note asks a downstream question. Suppose the data producer ships not only a canonical linkage but the candidate-match graph itself: for each source record, all plausible target records together with a pairwise score. How should an analyst convert that object into a regression dataset, and what happens if they do so naively?
+
+The existing literature on regression with linked data is substantial. Early bias-correction work includes \citet{scheuren1993,scheuren1997} and \citet{lahiri2005}. Subsequent contributions address probability-linked data, incomplete linkage, probabilistic multi-linkage, correlated linkage error, and linked-data secondary analysis more broadly \citep{chambers2009,kim2012multi,kim2012incomplete,kim2015,han2019,chambers2020,wang2022,doidge2019}. Multiple-imputation and primary-analysis approaches include \citet{goldstein2012,harron2014,hof2012,hof2015,hof2017,tancredi2011,tancredi2015,gutman2013,steorts2016,dalzell2018}. More recent post-linkage work includes \citet{slawski2025}; \citet{slawski2021} is a closely related precursor for partially shuffled linear regression rather than a general linked-data framework. A companion paper \citep{sood2025selection} formalizes the join itself as a selection problem over feasible linked tables, connecting to the finite selection model literature; this note takes up the downstream inference question that follows.
+
+My contribution is narrower. I focus on the econometric problem created when a data product ships a many-to-many candidate graph for a fuzzy geographic join. I make four points. First, the inferential consequences of linkage error depend on the estimand. Second, the two most obvious one-shot resolutions of the candidate graph produce distinct pathologies. Third, multiple imputation and validation-based calibration are useful but answer different questions. Fourth, even perfect treatment of the analyst's own candidate graph does not solve upstream linkage error frozen into the shipped covariates.
+
+\section{Setup and notation}
+
+Let $S=\{1,\ldots,n\}$ index source records and $T=\{1,\ldots,K\}$ index target records. For source unit $i$, let the true target be $v(i)\in T$. The regression of interest is
+\begin{equation}
+Y_i=\beta_0+\beta_1 X_{v(i)}+\eta_{v(i)}+\varepsilon_i,
+\label{eq:dgp}
+\end{equation}
+where $X_k$ is a target-level covariate, $\eta_k$ is a target-level shock, and $\varepsilon_i$ is idiosyncratic noise.
+
+A fuzzy matcher produces a candidate graph $\mathcal G=(S,T,E,s)$, where $E\subseteq S\times T$ is the set of candidate edges and $s:E\to[0,1]$ is a pairwise score. For source unit $i$, define the candidate set
+\[
+\mathcal C_i=\{(j,s_{ij}):(i,j)\in E\}.
+\]
+I distinguish throughout between the raw pairwise score $s_{ij}$ and a calibrated match probability
+\[
+p_{ij}\approx P(v(i)=j\mid \mathcal C_i),
+\]
+which is an additional object that must be estimated; it is not implied by the score itself.
+
+A central theme of the paper is the mismatch between the \emph{edge-level} nature of the candidate graph and the \emph{row-level} structure of the regression dataset \citep[see][for a general treatment of this mismatch]{sood2025selection}. The graph contains many candidate edges per source unit. The regression requires one covariate and one cluster assignment per source unit.
+
+\section{Which linkage errors matter depends on the estimand}
+
+The first mistake analysts make is to talk about ``linkage error'' as though it had a universal inferential cost. It does not.
+
+\paragraph{Treatment-assignment joins.}
+If the linkage determines treatment status, a false match contaminates both groups: one unit is moved into the wrong group and another is displaced from the correct one. In that setting, false positives and false negatives both matter directly for bias.
+
+\paragraph{Outcome-attachment joins within pre-assigned groups.}
+If the groups are fixed before linkage and the join only attaches outcomes within group, then within-group permutations are benign for unweighted group means. Only errors that cross an estimand-relevant boundary matter for bias.
+
+\paragraph{Level estimands.}
+If the estimand is a level for a specific population, every wrong attachment matters.
+
+The practical implication is that the ``best'' resolution of a candidate graph is estimand-specific. A treatment-assignment design typically requires a much harsher trade-off against false matches than a design in which ambiguity remains within groups.
+
+When calibrated probabilities are available, the resolution problem can be written as a maximum-weight matching problem. Let the expected utility of selecting edge $(i,j)$ be
+\[
+a_{ij}=u_{\mathrm{TP}}\,p_{ij}-u_{\mathrm{FP}}(1-p_{ij}),
+\]
+where $u_{\mathrm{TP}}>0$ is the value of a true positive and $u_{\mathrm{FP}}>0$ is the cost of a false positive. Then the linkage rule solves
+\begin{equation}
+\max_{L\subseteq E} \sum_{(i,j)\in L} a_{ij}
+\label{eq:decision}
+\end{equation}
+subject to the application's assignment constraints. Edges with $a_{ij}\le 0$ can be screened out ex ante, but the final solution remains a constrained optimization problem rather than a pure edgewise threshold rule.
+
+\section{Two naive resolutions of the candidate graph}
+
+\subsection{Expanded edge-level regression}
+
+A natural first idea is to keep every edge $(i,j)$ with score above a threshold and run a weighted regression on the resulting edge-level file. Let
+\[
+w_{ij}=\frac{s_{ij}}{\sum_{j':(i,j')\in E}s_{ij'}}
+\qquad\text{with}\qquad \sum_j w_{ij}=1.
+\]
+Define the score-weighted average covariate
+\[
+\tilde X_i=\sum_j w_{ij}X_j
+\]
+and the within-candidate-set variance
+\[
+V_i=\sum_j w_{ij}(X_j-\tilde X_i)^2.
+\]
+
+\begin{proposition}[Expanded versus collapsed slope]
+Assume the regression is fit with centered variables and edge weights $w_{ij}$. The weighted least-squares slope from the expanded edge-level file is
+\[
+\hat\beta_{\mathrm{exp}}
+=
+\frac{\sum_i Y_i\tilde X_i}{\sum_i \tilde X_i^2+\sum_i V_i}.
+\]
+If instead one collapses to one row per source unit using covariate $\tilde X_i$, the resulting slope is
+\[
+\hat\beta_{\mathrm{col}}
+=
+\frac{\sum_i Y_i\tilde X_i}{\sum_i \tilde X_i^2}.
+\]
+Hence, whenever the two slopes share the same sign,
+\[
+|\hat\beta_{\mathrm{exp}}|\le |\hat\beta_{\mathrm{col}}|.
+\]
+\end{proposition}
+
+\begin{proof}
+Because $Y_i$ is constant across the candidate edges for source unit $i$,
+\[
+\sum_{i,j} w_{ij}Y_iX_j=\sum_i Y_i\tilde X_i.
+\]
+Also,
+\[
+\sum_{i,j} w_{ij}X_j^2=\sum_i \tilde X_i^2+\sum_i V_i
+\]
+by the usual variance decomposition identity.
+\end{proof}
+
+This is an algebraic result, not a subtle asymptotic one. Expanding the graph and reusing the same outcome across multiple candidate covariates mechanically adds the penalty $\sum_i V_i$ to the denominator. The more heterogeneous the candidate set, the larger the penalty.
+
+The expanded file also corrupts the cluster structure. A target cluster in the expanded file contains outcomes generated under other targets' shocks whenever those other units include the target as a candidate. That makes the expanded graph a useful shipped artifact but a poor regression dataset.
+
+\subsection{Score-collapsed regression}
+
+A second natural idea is to collapse each candidate set to a single averaged covariate,
+\[
+\tilde X_i=\sum_j w_{ij}X_j.
+\]
+Write
+\[
+\tilde X_i = X_i^* + u_i,\qquad X_i^*\equiv X_{v(i)}.
+\]
+The quantity $u_i$ is measurement error induced by score averaging.
+
+\begin{proposition}[Collapsed regression as nonclassical EIV]
+Suppose
+\[
+E[\eta_{v(i)}+\varepsilon_i\mid X_i^*,u_i]=0.
+\]
+Then the probability limit of the collapsed OLS slope is
+\[
+\operatorname{plim}\hat\beta_{\mathrm{col}}
+=
+\beta_1
+\frac{\operatorname{Var}(X^*)+\operatorname{Cov}(X^*,u)}
+{\operatorname{Var}(X^*)+\operatorname{Var}(u)+2\operatorname{Cov}(X^*,u)}.
+\]
+If $\operatorname{Cov}(X^*,u)=0$, this reduces to classical attenuation. If $\operatorname{Cov}(X^*,u)\neq 0$, the bias can have either sign.
+\end{proposition}
+
+\begin{proof}
+Write $Y_i=\beta_1 X_i^*+\nu_i$, where $\nu_i=\eta_{v(i)}+\varepsilon_i$ and $E[\nu_i\mid X_i^*,u_i]=0$. Then
+\[
+\operatorname{plim}\hat\beta_{\mathrm{col}}
+=
+\frac{\operatorname{Cov}(X^*+u,\beta_1X^*+\nu)}
+{\operatorname{Var}(X^*+u)}
+=
+\beta_1
+\frac{\operatorname{Var}(X^*)+\operatorname{Cov}(X^*,u)}
+{\operatorname{Var}(X^*)+\operatorname{Var}(u)+2\operatorname{Cov}(X^*,u)}.
+\]
+\end{proof}
+
+The intuition is straightforward. In many fuzzy matching problems, errors are not exchangeable across all records. They are local to a confusable neighborhood. A unit from \emph{rampur} is likely to be confused with \emph{rampura} or \emph{ramnagar}, not with an arbitrary distant place. Once ambiguity is structured in that way, $u_i$ will generally covary with $X_i^*$, and attenuation is no longer the default case.
+
+\section{Corrections}
+
+\subsection{Multiple imputation over candidate assignments}
+
+When the analyst has access to the candidate graph and calibrated probabilities, a direct fix is to treat the unresolved linkage as missing data. The required conditions are stronger than they are sometimes presented.
+
+\begin{assumption}[Conditions for MI over candidate assignments]
+The multiple-imputation strategy requires:
+\begin{enumerate}
+\item high recall: for most units, the true target lies in the candidate set;
+\item calibrated probabilities: $p_{ij}$ is a reasonable approximation to $P(v(i)=j\mid \mathcal C_i)$;
+\item an acceptable approximation to the dependence structure induced by the graph.
+\end{enumerate}
+\end{assumption}
+
+Under these conditions, one can draw $M$ completed datasets by assigning one target per source unit in each draw, estimate the regression in each completed dataset, and combine results with Rubin's rules \citep{rubin1987}. This avoids both the within-candidate-set variance penalty of the expanded estimator and the averaging pathology of the collapsed estimator.
+
+The diagnostic $\lambda = (1+1/M)B/T$, where $B$ is the between-imputation variance and $T$ is the total variance, is itself estimand-specific. If all ambiguous candidates fall within the same group or have similar covariate values, different draws produce similar estimates and $\lambda$ is small regardless of the ambiguity share. If the candidates straddle an estimand-relevant boundary, $\lambda$ concentrates exactly where it should. The same candidate graph produces different $\lambda$ values for different downstream analyses.
+
+The main caveat is dependence. If a connected component contains many source units and a small number of targets, independent draws at the unit level may produce implausible assignments. In those settings, a component-level sampler or a joint posterior over matchings is preferable \citep{tancredi2011,steorts2016}.
+
+\subsection{Validation-sample calibration}
+
+If a validation sample with verified links is available, the problem changes. Let $X_i^\pi$ denote the covariate attached by the linked file and let $X_i^*$ denote the verified covariate in the validation sample. In the single-regressor linear case, suppose the calibration model is
+\[
+X_i^*=\alpha+\gamma X_i^\pi+r_i,\qquad E[r_i\mid X_i^\pi]=0.
+\]
+If the substantive model is linear with one mismeasured regressor, then a regression-calibration correction is
+\[
+\hat\beta_{\mathrm{RC}}=\frac{\hat\beta_{\mathrm{naive}}}{\hat\gamma}.
+\]
+This is a scalar correction for a scalar problem. With multiple regressors, interactions, or nonlinear outcome models, one needs multivariate regression calibration or a fuller joint error model rather than simple division \citep{carroll2006}.
+
+The validation sample must represent the full estimand population, not just the subset retained by a canonical matching rule. Otherwise it cannot reveal selection induced by missed matches.
+
+\section{When does matching uncertainty matter?}
+
+Three conditions determine whether matching uncertainty is large relative to sampling uncertainty. First, a non-trivial share of records must be ambiguous. Second, the candidate targets in ambiguous sets must differ meaningfully on $X$. Third, the ambiguity must cross estimand-relevant boundaries.
+
+The first two conditions are about the candidate graph: how many source units have close candidates, and how different those candidates are on the covariate of interest. The third is about the downstream analysis. If the analyst's estimand is a within-group mean and all ambiguous candidates fall within the same group, matching uncertainty is irrelevant even when the first two conditions hold. If the estimand is a treatment effect and ambiguous candidates straddle the treatment boundary, matching uncertainty is concentrated in the most damaging place. The same candidate graph produces different effective matching uncertainty for different estimands.
+
+If any of the three conditions fails, matching uncertainty is small.
+
+Tables~\ref{tab:estimators}--\ref{tab:variance_decomp} show the five estimators, MI diagnostics, and a bootstrap variance decomposition in a medium-scale simulation ($K=40$ targets, $n=600$ source units, three confusable name clusters with covariate spread up to 0.50, DGP $\beta_1=5$).
+
+\begin{table}[ht]
+\centering
+\caption{Estimator comparison, medium-scale simulation ($K=40$, $n=600$).}
+\label{tab:estimators}
+\input{../tabs/estimators_main}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{MI diagnostics via Rubin's rules ($M=200$ draws).}
+\label{tab:mi_diag}
+\input{../tabs/mi_diagnostics}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Bootstrap variance decomposition ($B=200$ replicates).}
+\label{tab:variance_decomp}
+\input{../tabs/variance_decomp}
+\end{table}
+
+The collapsed estimator overshoots the oracle by 46\%. The expanded estimator undershoots by 42\%. MI recovers the oracle to within 5\%. The between-imputation share of variance is $\lambda = 0.006$, reflecting a design in which only 4\% of source units are ambiguous. The bootstrap exercise shows that matching uncertainty is small relative to sampling uncertainty in this design: the variance of $\hat\beta_1$ from sampling (holding matches fixed) is $0.22$, from matching (holding the sample fixed) is $0.008$, and the joint variance is $0.18$.
+
+In regimes with 15--35\% ambiguous records, $\lambda$ can exceed 0.10. Whether the analyst needs $\lambda$ or just a corrected estimate determines which correction path to take. As simulation-based guidance: if $\lambda < 0.05$, matching uncertainty can be noted but safely ignored; if $\lambda > 0.10$, the MI-based interval should be the primary reported interval.
+
+\section{Implications for data products}
+
+The corrections in Section~5 address the analyst's own linkage uncertainty. Two paths are available: MI over the candidate graph, or regression calibration with a validation sample. Both assume the covariates in the target table are measured without error. In practice, many data products are themselves assembled by fuzzy matching, and the analyst inherits a second layer of matching error that neither MI nor regression calibration can address.
+
+\subsection{Upstream contamination}
+
+Let $X_k^{\mathrm{pub}}$ denote the covariate published for target $k$. Suppose the data product computes $X_k^{\mathrm{pub}}$ by averaging administrative records assigned to $k$ in an earlier join $J_1$. If a fraction $\alpha_k$ of records assigned to $k$ truly belong elsewhere, the published covariate is
+\begin{equation}
+X_k^{\mathrm{pub}}
+\approx
+(1-\alpha_k)X_k^*+\alpha_k\bar X_{-k},
+\label{eq:upstream}
+\end{equation}
+where $X_k^*$ is the true target-level covariate and $\bar X_{-k}$ is the mean among the wrongly assigned records. Equation~\eqref{eq:upstream} is exact only when the correctly retained records for target $k$ are representative of the target; otherwise it should be read as a first-order approximation. The contamination error is $u_k^{(1)} = \alpha_k(\bar X_{-k} - X_k^*)$.
+
+If the analyst then misassigns source unit $i$ to target $\pi(i)$ in their own join $J_2$, the total covariate error decomposes as
+\[
+u_i
+=
+\underbrace{(X_{\pi(i)}^*-X_{v(i)}^*)}_{\text{downstream wrong-target error}}
++
+\underbrace{u_{\pi(i)}^{(1)}}_{\text{upstream contamination}}.
+\]
+The two components are not independent: both error sources are structured by the same geography, and when $\pi(i) \neq v(i)$, the upstream contamination is evaluated at the wrong target. Applying Proposition~2 to the two-layer error,
+\begin{equation}\label{eq:twolayer_plim}
+    \operatorname{plim}\hat\beta = \beta_1 \cdot
+    \frac{\operatorname{Var}(X^*) + \operatorname{Cov}(X^*, u^{(1)} + u^{(2)})}
+         {\operatorname{Var}(X^*) + \operatorname{Var}(u^{(1)}) + \operatorname{Var}(u^{(2)}) + 2\operatorname{Cov}(u^{(1)},u^{(2)}) + 2\operatorname{Cov}(X^*, u^{(1)} + u^{(2)})}.
+\end{equation}
+The analyst can estimate $\operatorname{Var}(u^{(2)})$ from the candidate graph they observe. The remaining terms are frozen into the data product. Consequently, $\lambda$ computed from MI over $J_2$ understates total matching uncertainty.
+
+\subsection{Estimand-specific contamination}
+
+The upstream contamination affects different published covariates differently, even though the underlying matching errors are the same. The misassignment share $\alpha_k$ is the same for all covariates computed from the same upstream-linked records. But the gap $\bar X_{-k} - X_k^*$ depends on how much the covariate varies within the confusable cluster.
+
+\begin{proposition}[Estimand-specific contamination]
+Let $X^{(a)}$ and $X^{(b)}$ be two target-level covariates computed from the same set of $J_1$-linked records, with contamination errors $u_k^{(1,a)} = \alpha_k(\bar X_{-k}^{(a)} - X_k^{*(a)})$ and $u_k^{(1,b)} = \alpha_k(\bar X_{-k}^{(b)} - X_k^{*(b)})$. Then
+\[
+    \frac{\operatorname{Var}(u^{(1,a)})}{\operatorname{Var}(u^{(1,b)})}
+    =
+    \frac{\sum_k \alpha_k^2 (\bar X_{-k}^{(a)} - X_k^{*(a)})^2}
+         {\sum_k \alpha_k^2 (\bar X_{-k}^{(b)} - X_k^{*(b)})^2}.
+\]
+This ratio depends entirely on the within-cluster heterogeneity of each covariate and can be arbitrarily large or small.
+\end{proposition}
+
+In a companion simulation ($K=20$, $n=150$, multivariate DGP with $\beta_{\mathrm{lit}}=5$ and $\beta_{\mathrm{pop}}=1.5$), two analysts using the same data product, same joins, and same source units face a 38-fold difference in total bias: $-0.14$ for the literacy coefficient versus $+0.004$ for the log-population coefficient. The upstream match rate is identical for both analysts. The upstream contamination share $\alpha_k$ is identical. The damage is not.
+
+\subsection{What data products should ship}
+
+The upstream contamination result has a concrete implication: summary match-quality statistics---overall match rate, pairwise accuracy---are insufficient diagnostics for downstream analysts. Two analysts with the same match rate face different effective contamination, and neither can assess their own exposure from the published match rate alone.
+
+A useful linked-data product should expose three tiers of artifacts.
+
+The baseline tier is the canonical linkage with match-status flags identifying each record as an exact match, unambiguous fuzzy match, ambiguous candidate set, or no candidate. Analysts who never look deeper still benefit from knowing which records are exact matches, which are fuzzy, and which were dropped.
+
+The second tier is the candidate-match graph for the analyst's own join. This enables MI, regression calibration (when combined with a validation sample), and estimand-specific resolution. Without this, the analyst is locked into the canonical policy's implicit $u_{\mathrm{FP}}/u_{\mathrm{TP}}$ ratio. Because different estimands face different error costs (Section~3), different analysts may need to resolve the same candidate graph at different thresholds; shipping a single canonical linkage forecloses that choice.
+
+The third tier addresses upstream contamination. At minimum, the data producer should document which published covariates were computed from fuzzy-matched records, along with the match rate and the geographic distribution of ambiguous matches. Ideally, the data producer would ship a validation sample or the upstream candidate-match table, enabling the downstream analyst to propagate both layers of uncertainty. Without these, the upstream component of matching uncertainty is invisible and frozen.
+
+The broader lesson is that linkage uncertainty is not fully summarized by an overall match rate. What matters is where ambiguity lies, how it covaries with the variables used in the downstream estimand, and how much error was already embedded upstream in the shipped covariates. Matching uncertainty, when non-negligible, belongs in the same accounting as sampling, clustering, and heteroskedasticity---for the analyst's own join. For the upstream join, they need the data producer's help.
+
+\clearpage
+\bibliographystyle{apalike}
+\bibliography{references}
+
+\clearpage
+\appendix
+\section*{Appendix}
+\input{fuzzy_joins_SI}
+
+\end{document}

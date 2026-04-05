@@ -1,0 +1,456 @@
+% SI content - included in main document via \input
+% Requires: listings, xcolor packages in main preamble
+
+\lstdefinestyle{sql}{
+  language=SQL,
+  basicstyle=\small\ttfamily,
+  keywordstyle=\bfseries\color{blue!70!black},
+  commentstyle=\color{gray},
+  stringstyle=\color{red!60!black},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!5},
+  morekeywords={ENUM,FLOAT,TEXT,BOOLEAN,REFERENCES,CHECK}
+}
+
+\section{Schema for fuzzy-joined data products}
+
+This appendix proposes a relational schema for shipping data products built on fuzzy joins. The schema covers the two-table case: a source table $S$ linked to a target table $T$ via string similarity on noisy identifiers. Eight tables are defined. The first two are inputs; the remaining six are artifacts the data producer ships alongside the analysis-ready panel.
+
+These six artifacts correspond to the three tiers described in Section~6.3 of the main text. The canonical linkage table is the baseline tier: match-status flags for every source record. The candidate-match table, connected component table, and component-covariate diagnostics table form the second tier: the candidate graph and per-covariate diagnostics that enable MI, regression calibration, and estimand-specific resolution. The validation sample table and covariate provenance table support the third tier: verified links for the analyst's own join and documentation of upstream linkage provenance.
+
+All schemas use SQL-style definitions for precision. Primary keys are marked \texttt{PK}; foreign keys reference their parent table. Implementers can adapt these to flat files (CSV/Parquet) by treating the key constraints as documentation rather than enforcement.
+
+\subsection{Input tables}
+
+\subsubsection{Source table}
+
+One row per record to be linked. The table includes the raw reported name used for matching, outcome variables, and any covariates measured at the source level.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE source (
+    source_id       INTEGER PRIMARY KEY,
+    reported_name   TEXT NOT NULL,
+    -- outcome and source-level covariates
+    revenue         FLOAT,
+    n_employees     INTEGER,
+    year            INTEGER
+);
+\end{lstlisting}
+
+\subsubsection{Target table}
+
+One row per entity in the reference frame. The table includes the canonical name, geographic identifiers, and target-level covariates used in downstream regressions.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE target (
+    target_id       INTEGER PRIMARY KEY,
+    target_name     TEXT NOT NULL,
+    -- geographic hierarchy
+    district_id     INTEGER,
+    state_id        INTEGER,
+    -- target-level covariates
+    literacy        FLOAT,
+    population      INTEGER,
+    area_sq_km      FLOAT
+);
+\end{lstlisting}
+
+\subsection{Tier 1: Canonical linkage}
+
+\subsubsection{Canonical linkage table}
+
+One row per source record. This is the default analysis dataset: the deterministic resolution of the candidate-match graph under a stated policy $(\tau, \delta)$. Every source record appears exactly once, whether matched or not.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE canonical_linkage (
+    source_id       INTEGER PRIMARY KEY
+                    REFERENCES source(source_id),
+    target_id       INTEGER
+                    REFERENCES target(target_id),
+                    -- NULL if unmatched
+    match_score     FLOAT,
+                    -- score of the assigned pair; NULL if unmatched
+    match_status    ENUM('exact',
+                         'unambiguous_fuzzy',
+                         'ambiguous_dropped',
+                         'below_threshold',
+                         'no_candidates')
+                    NOT NULL,
+    match_method    TEXT,
+                    -- e.g., 'levenshtein', 'jaro_winkler_v2'
+    score_gap       FLOAT,
+                    -- s_{i(1)} - s_{i(2)}; NULL if <= 1 candidate
+    n_candidates    INTEGER NOT NULL DEFAULT 0,
+    component_id    INTEGER
+                    -- connected component in the candidate graph
+);
+\end{lstlisting}
+
+\paragraph{Design notes.}
+\begin{itemize}
+    \item \texttt{match\_status} distinguishes the reason a record is or is not linked. \texttt{exact} means the match was deterministic (e.g., a shared unique identifier). \texttt{unambiguous\_fuzzy} means the top candidate passed both $\tau$ and $\delta$. The remaining three categories are different failure modes: ambiguous (multiple close candidates), below threshold (best score too low), and no candidates (nothing passed screening).
+    \item \texttt{target\_id} is \texttt{NULL} for unmatched records. This makes the canonical linkage a left join from source to target, not an inner join. Every source record is present, so the analyst can see what was dropped and why.
+    \item \texttt{n\_candidates} and \texttt{score\_gap} are summary statistics from the candidate set. They allow the analyst to assess match quality at the row level without loading the full candidate table.
+\end{itemize}
+
+\subsection{Tier 2: Candidate graph and diagnostics}
+
+\subsubsection{Candidate-match table}
+
+One row per (source, candidate target) pair above the screening threshold $\varepsilon$. This is the bipartite candidate-match graph $\mathcal{G}$. Every resolution policy discussed in the paper---expanded, collapsed, MI, alternative $(\tau',\delta')$---can be reconstructed from this table.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE candidate_matches (
+    source_id       INTEGER NOT NULL
+                    REFERENCES source(source_id),
+    target_id       INTEGER NOT NULL
+                    REFERENCES target(target_id),
+    match_score     FLOAT NOT NULL
+                    CHECK (match_score >= 0 AND match_score <= 1),
+    match_probability FLOAT,
+                    -- calibrated P(v(i)=j | C_i); NULL if
+                    -- uncalibrated. See metadata for whether
+                    -- this column is populated.
+    match_rank      INTEGER NOT NULL,
+                    -- rank within this source_id's candidate set
+                    -- (1 = best score)
+    is_default      BOOLEAN NOT NULL,
+                    -- TRUE if this pair is the canonical assignment
+    component_id    INTEGER,
+    PRIMARY KEY (source_id, target_id)
+);
+\end{lstlisting}
+
+\paragraph{Design notes.}
+\begin{itemize}
+    \item The primary key is (source\_id, target\_id): each pair appears at most once.
+    \item \texttt{match\_score} is the raw pairwise similarity. \texttt{match\_probability} is the calibrated posterior probability $p_{ij} \approx P(v(i) = j \mid \mathcal{C}_i)$. These are different objects, as emphasized in Section~2 of the main text. When calibrated probabilities are available, they should be shipped alongside the raw scores. When they are not, the column is \texttt{NULL} and the metadata should say so. The MI procedure in Section~5.1 and the decision-theoretic formulation in Section~3 (equation~\ref{eq:decision}) both require $p_{ij}$, not $s_{ij}$.
+    \item \texttt{is\_default} flags which pair, if any, is the canonical assignment. For unmatched source records, no row has \texttt{is\_default = TRUE}. For matched records, exactly one row does. Reconstructing the canonical linkage is: \texttt{SELECT * FROM candidate\_matches WHERE is\_default = TRUE}.
+    \item Source records with zero candidates have no rows in this table. To recover the full source population, left-join \texttt{canonical\_linkage} to \texttt{candidate\_matches}.
+    \item The screening threshold $\varepsilon$ should be documented in metadata. It is typically looser than $\tau$, so the candidate table includes pairs that the canonical policy would not assign.
+\end{itemize}
+
+\subsubsection{Connected component table}
+\label{sec:components}
+
+One row per connected component in the candidate-match graph. A connected component is a maximal set of source and target records linked by candidate edges. Singletons have no ambiguity. Dense components with multiple sources and targets are where matching decisions are interdependent.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE components (
+    component_id    INTEGER PRIMARY KEY,
+    n_sources       INTEGER NOT NULL,
+    n_targets       INTEGER NOT NULL,
+    n_edges         INTEGER NOT NULL,
+    density         FLOAT,
+                    -- n_edges / (n_sources * n_targets)
+    mean_score      FLOAT,
+    min_gap         FLOAT,
+                    -- minimum score gap among source records
+    n_ambiguous     INTEGER
+                    -- sources with status 'ambiguous_dropped'
+);
+\end{lstlisting}
+
+\paragraph{Design notes.}
+\begin{itemize}
+    \item This table is a diagnostic summary. The analyst can quickly identify components where matching uncertainty concentrates: large \texttt{n\_ambiguous}, high \texttt{density}.
+    \item Covariate-specific diagnostics are in the separate \texttt{component\_covariate\_diagnostics} table below, because within-cluster heterogeneity is covariate-specific (Proposition~3 in the main text).
+\end{itemize}
+
+\subsubsection{Component-covariate diagnostics table}
+
+One row per (component, covariate) pair. This table implements the insight from Proposition~3 in the main text: the same upstream matching error produces different contamination for different covariates, depending on within-cluster heterogeneity. The analyst can query this table to determine whether their specific covariate is at risk.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE component_covariate_diagnostics (
+    component_id    INTEGER NOT NULL
+                    REFERENCES components(component_id),
+    covariate_name  TEXT NOT NULL,
+                    -- matches a column name in the target table
+    x_range         FLOAT,
+                    -- max(X) - min(X) across targets in component
+    x_mean          FLOAT,
+    x_sd            FLOAT,
+    PRIMARY KEY (component_id, covariate_name)
+);
+\end{lstlisting}
+
+\paragraph{Design notes.}
+\begin{itemize}
+    \item \texttt{x\_range} measures how much MI draws can vary within this component for this covariate. A large range in a component with many ambiguous records means matching uncertainty matters for this covariate. A small range means it does not, regardless of how ambiguous the component is.
+    \item The analyst can join this table with \texttt{components} and sort by \texttt{n\_ambiguous * x\_range} to find where matching uncertainty concentrates for their specific estimand.
+    \item This table should be populated for every target-level covariate that appears in the shipped data product. It is the schema-level implementation of the estimand-specific diagnostic discussed in Section~6.2.
+\end{itemize}
+
+\subsection{Tier 3: Validation and upstream provenance}
+
+\subsubsection{Validation sample table}
+
+One row per source record in the verified golden set. The golden set is a random sample from the \emph{full source population}, including records that the canonical policy dropped.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE validation_sample (
+    source_id       INTEGER PRIMARY KEY
+                    REFERENCES source(source_id),
+    true_target_id  INTEGER NOT NULL
+                    REFERENCES target(target_id),
+    verification    ENUM('unique_id', 'clerical_review',
+                         'field_verification')
+                    NOT NULL,
+    canonical_target_id  INTEGER
+                    REFERENCES target(target_id),
+                    -- NULL if this record was dropped
+    match_status    ENUM('exact',
+                         'unambiguous_fuzzy',
+                         'ambiguous_dropped',
+                         'below_threshold',
+                         'no_candidates')
+                    NOT NULL
+);
+\end{lstlisting}
+
+\paragraph{Design notes.}
+\begin{itemize}
+    \item The critical design requirement (Section~5.2 of the main text) is that this table must sample from the full source population, not just from matched records. Without dropped records, selection bias from false negatives cannot be assessed.
+    \item \texttt{canonical\_target\_id} alongside \texttt{true\_target\_id} lets the analyst compute the confusion matrix and calibration slope directly.
+    \item The golden set should be stratified to oversample from ambiguous components. If stratified, sampling weights should be documented.
+\end{itemize}
+
+\subsubsection{Covariate provenance table}
+
+One row per target-level covariate in the shipped data product. This table documents which covariates were themselves produced from upstream fuzzy joins, enabling the analyst to assess exposure to the upstream contamination discussed in Section~6.1 of the main text.
+
+\begin{lstlisting}[style=sql]
+CREATE TABLE covariate_provenance (
+    covariate_name  TEXT PRIMARY KEY,
+                    -- matches a column name in the target table
+    source_join     TEXT,
+                    -- identifier for the upstream join that
+                    -- produced this covariate, or 'direct' if
+                    -- not derived from a fuzzy join
+    join_method     TEXT,
+                    -- e.g., 'levenshtein', 'probabilistic_rl'
+    upstream_match_rate FLOAT,
+                    -- share of upstream records successfully
+                    -- matched; NULL if source_join = 'direct'
+    upstream_n_ambiguous INTEGER,
+                    -- upstream records in ambiguous candidate
+                    -- sets; NULL if source_join = 'direct'
+    upstream_validation_available BOOLEAN,
+                    -- whether a validation sample exists for
+                    -- the upstream join
+    notes           TEXT
+);
+\end{lstlisting}
+
+\paragraph{Design notes.}
+\begin{itemize}
+    \item The key distinction is between covariates that come from a deterministic source (e.g., census tables linked by administrative codes, where \texttt{source\_join = 'direct'}) and covariates that were themselves computed from fuzzy-matched records. The analyst cannot assess upstream contamination without knowing which covariates fall into which category.
+    \item When \texttt{upstream\_validation\_available = TRUE}, the data producer should ship the upstream validation sample or document where it can be obtained. This enables regression calibration of the upstream error (Section~5.2).
+    \item Combined with the \texttt{component\_covariate\_diagnostics} table, the analyst can answer the question: ``For my specific covariate, was it produced by a fuzzy join, and if so, how much within-cluster heterogeneity exists in the components where my source records concentrate?'' This is the concrete implementation of the estimand-specific contamination analysis in Proposition~3.
+\end{itemize}
+
+\paragraph{Example rows.}
+
+\begin{center}
+\small
+\begin{tabular}{llcrcc}
+\toprule
+covariate & source\_join & method & match rate & n\_ambig & valid? \\
+\midrule
+literacy & ec\_to\_village\_v3 & levenshtein & 0.92 & 1840 & FALSE \\
+population & census\_admin\_code & direct & \texttt{NULL} & \texttt{NULL} & --- \\
+area\_sq\_km & census\_admin\_code & direct & \texttt{NULL} & \texttt{NULL} & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Literacy was computed from an upstream fuzzy join with 92\% match rate and 1,840 ambiguous records. Population and area come from census tables linked by administrative codes and carry no upstream matching uncertainty. The analyst regressing on literacy faces upstream contamination; the analyst regressing on population does not. Neither can tell from the overall match rate alone.
+
+\subsection{Reconstruction queries}
+
+The following queries reconstruct the resolution policies discussed in Section~4 of the main text.
+
+\paragraph{Canonical linkage (analysis-ready panel).}
+
+\begin{lstlisting}[style=sql]
+SELECT s.source_id, s.revenue, t.literacy
+FROM source s
+JOIN canonical_linkage cl ON s.source_id = cl.source_id
+JOIN target t ON cl.target_id = t.target_id
+WHERE cl.match_status IN ('exact', 'unambiguous_fuzzy');
+\end{lstlisting}
+
+\paragraph{Canonical linkage under alternative $(\tau', \delta')$.}
+
+\begin{lstlisting}[style=sql]
+WITH ranked AS (
+    SELECT source_id, target_id, match_score, match_rank,
+           match_score - LEAD(match_score) OVER (
+               PARTITION BY source_id ORDER BY match_rank
+           ) AS gap
+    FROM candidate_matches
+)
+SELECT source_id, target_id, match_score
+FROM ranked
+WHERE match_rank = 1
+  AND match_score >= 0.70   -- tau'
+  AND (gap >= 0.15 OR gap IS NULL);  -- delta'
+\end{lstlisting}
+
+\paragraph{Estimand-specific resolution via $u_{\mathrm{TP}}/u_{\mathrm{FP}}$.}
+
+When calibrated probabilities are populated, the analyst can resolve the candidate graph against a decision-theoretic threshold (equation~\ref{eq:decision} in the main text). A pair is included only when its expected utility is positive:
+
+\begin{lstlisting}[style=sql]
+-- Estimand-specific resolution
+-- Set u_tp and u_fp to reflect the analyst's error costs
+WITH scored AS (
+    SELECT source_id, target_id, match_probability,
+           :u_tp * match_probability
+             - :u_fp * (1 - match_probability) AS expected_util,
+           ROW_NUMBER() OVER (
+               PARTITION BY source_id
+               ORDER BY match_probability DESC
+           ) AS prob_rank
+    FROM candidate_matches
+    WHERE match_probability IS NOT NULL
+)
+SELECT source_id, target_id, match_probability
+FROM scored
+WHERE prob_rank = 1
+  AND expected_util > 0;
+-- Treatment-assignment: set u_fp >> u_tp (e.g., 10:1)
+-- Outcome-attachment:   set u_fp ~ u_tp  (e.g., 2:1)
+\end{lstlisting}
+
+\paragraph{Expanded full join.}
+
+\begin{lstlisting}[style=sql]
+WITH totals AS (
+    SELECT source_id, SUM(match_score) AS total_score
+    FROM candidate_matches
+    WHERE match_score >= 0.50
+    GROUP BY source_id
+)
+SELECT cm.source_id, cm.target_id, s.revenue, t.literacy,
+       cm.match_score / tot.total_score AS weight
+FROM candidate_matches cm
+JOIN source s ON cm.source_id = s.source_id
+JOIN target t ON cm.target_id = t.target_id
+JOIN totals tot ON cm.source_id = tot.source_id
+WHERE cm.match_score >= 0.50;
+\end{lstlisting}
+
+\paragraph{Collapsed (score-weighted average $X$).}
+
+\begin{lstlisting}[style=sql]
+WITH totals AS (
+    SELECT source_id, SUM(match_score) AS total_score
+    FROM candidate_matches
+    WHERE match_score >= 0.50
+    GROUP BY source_id
+)
+SELECT cm.source_id, s.revenue,
+       SUM(cm.match_score / tot.total_score * t.literacy)
+           AS literacy_avg
+FROM candidate_matches cm
+JOIN source s ON cm.source_id = s.source_id
+JOIN target t ON cm.target_id = t.target_id
+JOIN totals tot ON cm.source_id = tot.source_id
+WHERE cm.match_score >= 0.50
+GROUP BY cm.source_id, s.revenue;
+\end{lstlisting}
+
+\paragraph{MI draw (single imputation).}
+MI draws require randomness and are better implemented in a scripting language. Pseudocode for one draw:
+
+\begin{lstlisting}[style=sql]
+-- Pseudocode: one MI draw
+FOR EACH source_id IN canonical_linkage:
+  IF match_status IN ('exact', 'unambiguous_fuzzy'):
+    drawn_target = target_id  -- deterministic
+  ELSE IF n_candidates > 0:
+    candidates = SELECT target_id, match_probability
+                 FROM candidate_matches
+                 WHERE source_id = :source_id
+                   AND match_probability IS NOT NULL
+    -- draw one target proportional to match_probability
+    drawn_target = WEIGHTED_SAMPLE(candidates)
+  ELSE:
+    SKIP  -- no candidates; exclude from this draw
+  INSERT INTO mi_draw_m (source_id, drawn_target)
+\end{lstlisting}
+
+\paragraph{Regression calibration from the golden set.}
+
+\begin{lstlisting}[style=sql]
+-- Calibration slope: regress true X on assigned X
+SELECT v.source_id,
+       t_true.literacy AS x_true,
+       t_canon.literacy AS x_assigned
+FROM validation_sample v
+JOIN target t_true ON v.true_target_id = t_true.target_id
+JOIN target t_canon ON v.canonical_target_id = t_canon.target_id
+WHERE v.canonical_target_id IS NOT NULL;
+-- Feed into: x_true ~ x_assigned to get gamma_hat
+
+-- Selection bias diagnostic (requires full-population golden set)
+SELECT v.source_id, s.revenue, t_true.literacy AS x_true
+FROM validation_sample v
+JOIN source s ON v.source_id = s.source_id
+JOIN target t_true ON v.true_target_id = t_true.target_id;
+-- Compare: revenue ~ x_true (all records)
+-- versus:  revenue ~ x_true (WHERE canonical_target IS NOT NULL)
+-- Gap = selection bias from dropping ambiguous records
+\end{lstlisting}
+
+\paragraph{Upstream contamination assessment.}
+
+The analyst can estimate the implied contamination share $\alpha_k$ for each target from the candidate graph. For each target $k$, $\alpha_k$ is approximated by the fraction of candidate edges pointing to $k$ from source records whose best match is a \emph{different} target:
+
+\begin{lstlisting}[style=sql]
+-- Implied contamination share per target
+WITH best_matches AS (
+    SELECT source_id,
+           target_id AS best_target
+    FROM candidate_matches
+    WHERE match_rank = 1
+),
+edge_classification AS (
+    SELECT cm.target_id,
+           CASE WHEN cm.target_id != bm.best_target
+                THEN 1 ELSE 0
+           END AS is_spillover
+    FROM candidate_matches cm
+    JOIN best_matches bm ON cm.source_id = bm.source_id
+)
+SELECT target_id,
+       COUNT(*) AS n_edges,
+       SUM(is_spillover) AS n_spillover,
+       AVG(is_spillover) AS alpha_hat
+FROM edge_classification
+GROUP BY target_id
+ORDER BY alpha_hat DESC;
+-- Targets with high alpha_hat are those where upstream
+-- contamination is most likely to affect published covariates.
+-- Cross-reference with covariate_provenance to identify
+-- which covariates are at risk.
+\end{lstlisting}
+
+
+\subsection{Metadata}
+
+The data product should ship a metadata file (JSON or plain text) documenting:
+
+\begin{itemize}
+    \item \textbf{Matching algorithm:} name, version, parameters.
+    \item \textbf{Screening threshold} $\varepsilon$: the minimum score for a pair to appear in \texttt{candidate\_matches}.
+    \item \textbf{Assignment thresholds} $(\tau, \delta)$: the score and gap thresholds used to produce the canonical linkage.
+    \item \textbf{Score interpretation:} what \texttt{match\_score} represents (e.g., ``1 minus normalized Levenshtein distance,'' ``Fellegi-Sunter log-likelihood ratio''), and whether \texttt{match\_probability} is populated.
+    \item \textbf{Calibration method:} if \texttt{match\_probability} is populated, how it was estimated (e.g., ``isotonic regression on validation sample,'' ``multinomial within candidate set'').
+    \item \textbf{Validation sample design:} sampling frame (full population or matched only), stratification variables, sampling weights if applicable.
+    \item \textbf{Coverage summary:} number of source records by match status, overall match rate, number of connected components, and the share of source records in non-singleton components.
+\end{itemize}
