@@ -2,22 +2,25 @@
 Replication script for "From Data Products to Inference: The Econometrics of Fuzzy Joins"
 
 Produces:
-  - tables/example_candidates.tex   (Section 3: candidate-match table)
-  - tables/example_summary.tex      (Section 3: match outcome summary)
-  - tables/estimators_toy.tex       (Section 4: toy example estimator comparison)
-  - tables/estimators_main.tex      (Section 7: medium-scale estimator comparison)
-  - tables/variance_decomp.tex      (Section 7: bootstrap variance decomposition)
-  - tables/mi_diagnostics.tex       (Section 7: MI diagnostics via Rubin's rules)
+  - tabs/example_candidates.tex   (Section 3: candidate-match table)
+  - tabs/example_summary.tex      (Section 3: match outcome summary)
+  - tabs/estimators_toy.tex       (Section 4: toy example estimator comparison)
+  - tabs/estimators_main.tex      (Section 7: medium-scale estimator comparison)
+  - tabs/variance_decomp.tex      (Section 7: bootstrap variance decomposition)
+  - tabs/mi_diagnostics.tex       (Section 7: MI diagnostics via Rubin's rules)
 
-Usage: python replicate.py
+Usage: python scripts/replicate.py (from project root)
 """
 
-import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-os.makedirs("tables", exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TABS_DIR = PROJECT_ROOT / "tabs"
+TABS_DIR.mkdir(exist_ok=True)
+
 np.random.seed(73)
 
 # ============================================================
@@ -427,9 +430,9 @@ for fid in example_fids:
         tex += "\\midrule\n"
 tex += "\\bottomrule\n\\end{tabular}\n"
 
-with open("tables/example_candidates.tex", "w") as f:
+with open(TABS_DIR / "example_candidates.tex", "w") as f:
     f.write(tex)
-print("Wrote tables/example_candidates.tex")
+print(f"Wrote {TABS_DIR / 'example_candidates.tex'}")
 
 # --- TABLE: Match outcome summary ---
 status_ct = toy_csets["status"].value_counts()
@@ -447,9 +450,9 @@ for o in ["TP", "FP", "FN"]:
     tex += f"{o} & {c} & {100*c/n_total:.1f}\\% \\\\\n"
 tex += "\\bottomrule\n\\end{tabular}\n"
 
-with open("tables/example_summary.tex", "w") as f:
+with open(TABS_DIR / "example_summary.tex", "w") as f:
     f.write(tex)
-print("Wrote tables/example_summary.tex")
+print(f"Wrote {TABS_DIR / 'example_summary.tex'}")
 
 # --- Run toy estimators ---
 toy_results = run_estimators(
@@ -468,9 +471,9 @@ for label, key in [("Oracle", "oracle"), ("Canonical", "canonical"),
     tex += f"{label} & {r['beta']:.3f} & {r['se']:.3f} & {n_str} & {cl_str} \\\\\n"
 tex += "\\bottomrule\n\\end{tabular}\n"
 
-with open("tables/estimators_toy.tex", "w") as f:
+with open(TABS_DIR / "estimators_toy.tex", "w") as f:
     f.write(tex)
-print("Wrote tables/estimators_toy.tex")
+print(f"Wrote {TABS_DIR / 'estimators_toy.tex'}")
 
 
 # ============================================================
@@ -612,9 +615,9 @@ for label, key in [("Oracle", "oracle"), ("Canonical", "canonical"),
     tex += f"{label} & {r['beta']:.3f} & {r['se']:.3f} & {n_str} & {cl_str} \\\\\n"
 tex += "\\bottomrule\n\\end{tabular}\n"
 
-with open("tables/estimators_main.tex", "w") as f:
+with open(TABS_DIR / "estimators_main.tex", "w") as f:
     f.write(tex)
-print("Wrote tables/estimators_main.tex")
+print(f"Wrote {TABS_DIR / 'estimators_main.tex'}")
 
 # --- TABLE: MI diagnostics ---
 mi = main_results["mi"]
@@ -630,9 +633,9 @@ tex += f"$\\lambda$ & {mi['lambda']:.4f} \\\\\n"
 tex += f"95\\% CI & [{mi['beta']-1.96*mi['se']:.3f}, {mi['beta']+1.96*mi['se']:.3f}] \\\\\n"
 tex += "\\bottomrule\n\\end{tabular}\n"
 
-with open("tables/mi_diagnostics.tex", "w") as f:
+with open(TABS_DIR / "mi_diagnostics.tex", "w") as f:
     f.write(tex)
-print("Wrote tables/mi_diagnostics.tex")
+print(f"Wrote {TABS_DIR / 'mi_diagnostics.tex'}")
 
 # --- TABLE: Bootstrap variance decomposition ---
 bt = main_results["bootstrap"]
@@ -644,9 +647,9 @@ tex += f"Joint & {bt['sd_joint']:.4f} & {bt['var_joint']:.4f} \\\\\n"
 tex += f"Sum of components & --- & {bt['var_sampling']+bt['var_matching']:.4f} \\\\\n"
 tex += "\\bottomrule\n\\end{tabular}\n"
 
-with open("tables/variance_decomp.tex", "w") as f:
+with open(TABS_DIR / "variance_decomp.tex", "w") as f:
     f.write(tex)
-print("Wrote tables/variance_decomp.tex")
+print(f"Wrote {TABS_DIR / 'variance_decomp.tex'}")
 
 # --- Summary ---
 print("\n" + "=" * 60)
@@ -657,4 +660,4 @@ print(f"Canonical: beta={main_results['canonical']['beta']:.4f}")
 print(f"Expanded:  beta={main_results['expanded']['beta']:.4f}")
 print(f"Collapsed: beta={main_results['collapsed']['beta']:.4f}")
 print(f"MI:        beta={main_results['mi']['beta']:.4f}, lambda={main_results['mi']['lambda']:.4f}")
-print(f"\nAll tables written to tables/")
+print(f"\nAll tables written to {TABS_DIR}/")
